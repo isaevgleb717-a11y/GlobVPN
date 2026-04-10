@@ -174,4 +174,69 @@ std::string parseJSON(const std::string& json, const std::string& key);
 
 } // namespace GlobVPN
 
-#endif // GLOBVPN_HPP
+#endif // GLOBVPN_HOP
+
+
+// ============== GeoIP структуры ==============
+#pragma pack(push, 1)
+struct GeoIPRecordV4 {
+    uint32_t from_ip;      // Начало диапазона (network byte order)
+    uint32_t to_ip;        // Конец диапазона
+    char country_code[2];  // ISO код страны (2 буквы)
+};
+#pragma pack(pop)
+
+struct GeoIPDatabase {
+    std::vector<GeoIPRecordV4> records;
+    std::string version;
+    bool is_loaded;
+    
+    GeoIPDatabase() : is_loaded(false) {}
+};
+
+// ============== GeoIP класс ==============
+class GeoIP {
+private:
+    GeoIPDatabase db_;
+    std::mutex mutex_;
+    std::string db_path_;
+    
+    uint32_t ipToUint(const std::string& ip);
+    std::string uintToIp(uint32_t ip);
+    bool loadFromBinaryFile(const std::string& path);
+    bool downloadDatabase(const std::string& url);
+    bool parseV2RayDat(const std::string& path);
+    
+public:
+    GeoIP();
+    ~GeoIP();
+    
+    bool init(const std::string& db_path);
+    bool update();
+    std::string lookupCountry(const std::string& ip);
+    std::string lookupCountry(uint32_t ip_addr);
+    bool isLoaded() const { return db_.is_loaded; }
+    size_t getRecordCount() const { return db_.records.size(); }
+};
+
+// ============== Класс маршрутизации ==============
+class RoutingEngine {
+private:
+    std::unique_ptr<GeoIP> geoip_;
+    std::vector<std::string> bypass_countries_;
+    std::vector<std::string> proxy_countries_;
+    bool bypass_lan_;
+    std::string default_action_;
+    
+    bool isPrivateIP(uint32_t ip);
+    bool isInRange(uint32_t ip, uint32_t from, uint32_t to);
+    
+public:
+    RoutingEngine();
+    ~RoutingEngine();
+    
+    bool init(std::shared_ptr<GeoIP> geoip, const std::string& config_path);
+    std::string getRoute(const std::string& dest_ip);
+    bool shouldBypass(const std::string& dest_ip);
+    bool shouldProxy(const std::string& dest_ip);
+};
