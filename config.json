@@ -2,7 +2,13 @@
   "company": "GlobVPN",
   "country": "Netherlands",
   "protocol": "VLESS+Reality",
-  "version": "2.0.0",
+  "version": "2.1.0",
+  "geoip": {
+    "enabled": true,
+    "database_path": "geoip.dat",
+    "auto_update": true,
+    "update_url": "https://github.com/Loyalsoldier/geoip/releases/latest/download/geoip.dat"
+  },
   "servers": [
     {
       "name": "ams-01.globvpn.nl",
@@ -10,6 +16,7 @@
       "public_key": "nl_reality_pub_1a2b3c4d5e6f7g8h9i0j",
       "short_id": "deadbeef",
       "location": "Amsterdam",
+      "country_code": "NL",
       "load": 35
     },
     {
@@ -18,6 +25,7 @@
       "public_key": "nl_reality_pub_9z8y7x6w5v4u3t2s1r0q",
       "short_id": "cafebabe",
       "location": "Amsterdam",
+      "country_code": "NL",
       "load": 62
     },
     {
@@ -26,9 +34,16 @@
       "public_key": "nl_reality_pub_0a1b2c3d4e5f6g7h8i9j",
       "short_id": "feedface",
       "location": "Rotterdam",
+      "country_code": "NL",
       "load": 18
     }
   ],
+  "routing": {
+    "bypass_lan": true,
+    "bypass_countries": ["RU", "CN"],
+    "proxy_countries": ["NL"],
+    "default_action": "proxy"
+  },
   "client": {
     "uuid": "123e4567-e89b-12d3-a456-426614174000",
     "flow": "xtls-rprx-vision",
