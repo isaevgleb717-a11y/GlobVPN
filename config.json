@@ -1,0 +1,47 @@
+{
+  "company": "GlobVPN",
+  "country": "Netherlands",
+  "protocol": "VLESS+Reality",
+  "version": "2.0.0",
+  "servers": [
+    {
+      "name": "ams-01.globvpn.nl",
+      "port": 443,
+      "public_key": "nl_reality_pub_1a2b3c4d5e6f7g8h9i0j",
+      "short_id": "deadbeef",
+      "location": "Amsterdam",
+      "load": 35
+    },
+    {
+      "name": "ams-02.globvpn.nl",
+      "port": 8443,
+      "public_key": "nl_reality_pub_9z8y7x6w5v4u3t2s1r0q",
+      "short_id": "cafebabe",
+      "location": "Amsterdam",
+      "load": 62
+    },
+    {
+      "name": "rtm-01.globvpn.nl",
+      "port": 443,
+      "public_key": "nl_reality_pub_0a1b2c3d4e5f6g7h8i9j",
+      "short_id": "feedface",
+      "location": "Rotterdam",
+      "load": 18
+    }
+  ],
+  "client": {
+    "uuid": "123e4567-e89b-12d3-a456-426614174000",
+    "flow": "xtls-rprx-vision",
+    "encryption": "none",
+    "level": 0,
+    "fingerprint": "chrome",
+    "server_name": "www.microsoft.com"
+  },
+  "settings": {
+    "auto_reconnect": true,
+    "reconnect_delay_sec": 5,
+    "timeout_sec": 10,
+    "buffer_size": 32768,
+    "log_level": "info"
+  }
+}
