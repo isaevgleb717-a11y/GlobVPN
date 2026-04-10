@@ -1,55 +1,24 @@
 #include "globvpn.hpp"
-#include <cstring>
-#include <random>
-#include <sstream>
-#include <iomanip>
+#include <iostream>
 #include <thread>
 #include <chrono>
-#include <fstream>
-#include <algorithm>
-#include <ctime>
-#include <arpa/inet.h>
-
-#ifdef _WIN32
-    #include <windows.h>
-#else
-    #include <sys/select.h>
-    #include <fcntl.h>
-    #include <unistd.h>
-#endif
 
 namespace GlobVPN {
-
-// ============== Логирование ==============
-void GlobVPNClient::log(LogLevel level, const std::string& message) {
-    if (level < log_level_) return;
-    
-    const char* level_str[] = {"DEBUG", "INFO", "WARNING", "ERROR"};
-    auto now = std::time(nullptr);
-    char time_str[64];
-    std::strftime(time_str, sizeof(time_str), "%H:%M:%S", std::localtime(&now));
-    
-    std::cerr << "[" << time_str << "] [" << level_str[static_cast<int>(level)] << "] " << message << std::endl;
-}
 
 // ============== Хеш функции ==============
 std::vector<uint8_t> RealityHandshake::sha256(const std::vector<uint8_t>& data) {
     std::vector<uint8_t> hash(32);
-    
     uint64_t sum = 0;
     for (size_t i = 0; i < data.size() && i < 1024; i++) {
         sum += data[i];
     }
-    
     for (int i = 0; i < 32; i++) {
         hash[i] = (sum >> (i % 56)) & 0xFF;
     }
-    
     return hash;
 }
 
-std::vector<uint8_t> RealityHandshake::hmac_sha256(const std::vector<uint8_t>& key, 
-                                                    const std::vector<uint8_t>& data) {
+std::vector<uint8_t> RealityHandshake::hmac_sha256(const std::vector<uint8_t>& key, const std::vector<uint8_t>& data) {
     std::vector<uint8_t> combined = key;
     combined.insert(combined.end(), data.begin(), data.end());
     return sha256(combined);
@@ -60,7 +29,6 @@ RealityHandshake::RealityHandshake(const RealityConfig& config) : config_(config
 
 std::vector<uint8_t> RealityHandshake::buildClientHello() {
     std::vector<uint8_t> client_hello;
-    
     auto now = std::chrono::system_clock::now();
     auto timestamp = std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count();
     
@@ -102,7 +70,6 @@ bool RealityHandshake::verifyServerResponse(const std::vector<uint8_t>& response
 VLESSTunnel::VLESSTunnel(const VLESSConfig& vless, const RealityConfig& reality)
     : vless_config_(vless), reality_(reality), socket_fd_(-1), 
       state_(ConnectionState::DISCONNECTED), tx_bytes_(0), rx_bytes_(0), latency_ms_(0) {
-    
 #ifdef _WIN32
     WSADATA wsaData;
     WSAStartup(MAKEWORD(2, 2), &wsaData);
@@ -118,7 +85,6 @@ VLESSTunnel::~VLESSTunnel() {
 
 std::vector<uint8_t> VLESSTunnel::buildVLESSHeader() {
     std::vector<uint8_t> header;
-    
     header.push_back(0x01);
     
     std::string uuid_clean;
@@ -136,10 +102,8 @@ std::vector<uint8_t> VLESSTunnel::buildVLESSHeader() {
     
     header.push_back(static_cast<uint8_t>(vless_config_.flow.length()));
     header.insert(header.end(), vless_config_.flow.begin(), vless_config_.flow.end());
-    
     header.insert(header.end(), vless_config_.encryption.begin(), vless_config_.encryption.end());
     header.push_back(0x00);
-    
     header.push_back(static_cast<uint8_t>(vless_config_.level));
     
     return header;
@@ -147,13 +111,9 @@ std::vector<uint8_t> VLESSTunnel::buildVLESSHeader() {
 
 bool VLESSTunnel::connect(const std::string& server, int port, int timeout) {
     std::lock_guard<std::mutex> lock(mutex_);
-    
-    if (state_ != ConnectionState::DISCONNECTED) {
-        return false;
-    }
+    if (state_ != ConnectionState::DISCONNECTED) return false;
     
     state_ = ConnectionState::HANDSHAKE;
-    
     socket_fd_ = socket(AF_INET, SOCK_STREAM, 0);
     if (socket_fd_ < 0) {
         state_ = ConnectionState::ERROR;
@@ -173,10 +133,7 @@ bool VLESSTunnel::connect(const std::string& server, int port, int timeout) {
 #endif
     
     struct hostent* host = gethostbyname(server.c_str());
-    if (!host) {
-        disconnect();
-        return false;
-    }
+    if (!host) { disconnect(); return false; }
     
     struct sockaddr_in addr;
     addr.sin_family = AF_INET;
@@ -222,23 +179,15 @@ bool VLESSTunnel::connect(const std::string& server, int port, int timeout) {
 
 void VLESSTunnel::measureLatency() {
     auto start = std::chrono::steady_clock::now();
-    
     std::vector<uint8_t> ping = {'P', 'I', 'N', 'G'};
     send(ping);
-    
     std::vector<uint8_t> pong = recv(4);
     auto end = std::chrono::steady_clock::now();
-    
-    if (!pong.empty()) {
-        latency_ms_ = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
-    } else {
-        latency_ms_ = -1;
-    }
+    latency_ms_ = pong.empty() ? -1 : std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
 }
 
 void VLESSTunnel::disconnect() {
     std::lock_guard<std::mutex> lock(mutex_);
-    
     if (socket_fd_ >= 0) {
 #ifdef _WIN32
         closesocket(socket_fd_);
@@ -252,29 +201,20 @@ void VLESSTunnel::disconnect() {
 
 ssize_t VLESSTunnel::send(const std::vector<uint8_t>& data) {
     std::lock_guard<std::mutex> lock(mutex_);
-    
-    if (state_ != ConnectionState::ESTABLISHED) {
-        return -1;
-    }
+    if (state_ != ConnectionState::ESTABLISHED) return -1;
     
     uint32_t size = htonl(data.size());
     ssize_t sent = ::send(socket_fd_, (char*)&size, 4, 0);
     if (sent != 4) return -1;
     
     sent = ::send(socket_fd_, (char*)data.data(), data.size(), 0);
-    if (sent > 0) {
-        tx_bytes_ += sent;
-    }
-    
+    if (sent > 0) tx_bytes_ += sent;
     return sent;
 }
 
 std::vector<uint8_t> VLESSTunnel::recv(size_t buffer_size) {
     std::lock_guard<std::mutex> lock(mutex_);
-    
-    if (state_ != ConnectionState::ESTABLISHED) {
-        return {};
-    }
+    if (state_ != ConnectionState::ESTABLISHED) return {};
     
     uint32_t data_size = 0;
     int received = ::recv(socket_fd_, (char*)&data_size, 4, 0);
@@ -285,21 +225,14 @@ std::vector<uint8_t> VLESSTunnel::recv(size_t buffer_size) {
     
     std::vector<uint8_t> data(data_size);
     size_t total_received = 0;
-    
     while (total_received < data_size) {
-        received = ::recv(socket_fd_, (char*)data.data() + total_received, 
-                         data_size - total_received, 0);
+        received = ::recv(socket_fd_, (char*)data.data() + total_received, data_size - total_received, 0);
         if (received <= 0) break;
         total_received += received;
     }
     
     rx_bytes_ += total_received;
-    
-    if (total_received != data_size) {
-        return {};
-    }
-    
-    return data;
+    return (total_received == data_size) ? data : std::vector<uint8_t>();
 }
 
 ConnectionStats VLESSTunnel::getStats() {
@@ -313,104 +246,228 @@ ConnectionStats VLESSTunnel::getStats() {
     return stats;
 }
 
-// ============== JSON парсинг (упрощённый) ==============
-std::string readFile(const std::string& filename) {
-    std::ifstream file(filename);
-    if (!file.is_open()) {
-        return "";
+// ============== GeoIP ==============
+GeoIP::GeoIP() {}
+GeoIP::~GeoIP() {}
+
+uint32_t GeoIP::ipToUint(const std::string& ip) {
+    struct in_addr addr;
+    if (inet_pton(AF_INET, ip.c_str(), &addr) == 1) {
+        return ntohl(addr.s_addr);
     }
-    std::stringstream buffer;
-    buffer << file.rdbuf();
-    return buffer.str();
+    return 0;
 }
 
-std::string parseJSON(const std::string& json, const std::string& key) {
-    std::string search_key = "\"" + key + "\"";
-    size_t pos = json.find(search_key);
-    if (pos == std::string::npos) return "";
-    
-    pos = json.find(":", pos);
-    if (pos == std::string::npos) return "";
-    
-    pos++;
-    while (pos < json.length() && (json[pos] == ' ' || json[pos] == '\t' || json[pos] == '\n')) {
-        pos++;
-    }
-    
-    if (json[pos] == '"') {
-        pos++;
-        size_t end = json.find("\"", pos);
-        if (end != std::string::npos) {
-            return json.substr(pos, end - pos);
-        }
-    } else {
-        size_t end = json.find_first_of(",}\n", pos);
-        if (end != std::string::npos) {
-            return json.substr(pos, end - pos);
-        }
-    }
-    
-    return "";
+bool GeoIP::init(const std::string& db_path) {
+    db_path_ = db_path;
+    return loadFromBinaryFile(db_path);
 }
 
-// ============== GlobVPN Client ==============
+bool GeoIP::loadFromBinaryFile(const std::string& path) {
+    std::ifstream file(path, std::ios::binary);
+    if (!file.is_open()) return false;
+    
+    db_.records.clear();
+    uint32_t count;
+    file.read(reinterpret_cast<char*>(&count), sizeof(count));
+    count = ntohl(count);
+    
+    if (count == 0 || count > 500000) {
+        file.close();
+        return false;
+    }
+    
+    db_.records.resize(count);
+    for (uint32_t i = 0; i < count; i++) {
+        file.read(reinterpret_cast<char*>(&db_.records[i].from_ip), 4);
+        file.read(reinterpret_cast<char*>(&db_.records[i].to_ip), 4);
+        file.read(db_.records[i].country_code, 2);
+        db_.records[i].from_ip = ntohl(db_.records[i].from_ip);
+        db_.records[i].to_ip = ntohl(db_.records[i].to_ip);
+    }
+    
+    file.close();
+    db_.is_loaded = !db_.records.empty();
+    return db_.is_loaded;
+}
+
+std::string GeoIP::lookupCountry(const std::string& ip) {
+    return lookupCountry(ipToUint(ip));
+}
+
+std::string GeoIP::lookupCountry(uint32_t ip_addr) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!db_.is_loaded) return "UNKNOWN";
+    
+    auto it = std::upper_bound(db_.records.begin(), db_.records.end(), ip_addr,
+        [](uint32_t ip, const GeoIPRecordV4& record) {
+            return ip < record.from_ip;
+        });
+    
+    if (it != db_.records.begin()) {
+        --it;
+        if (ip_addr >= it->from_ip && ip_addr <= it->to_ip) {
+            return std::string(it->country_code, 2);
+        }
+    }
+    return "UNKNOWN";
+}
+
+// ============== RoutingEngine ==============
+RoutingEngine::RoutingEngine() : bypass_lan_(true), default_action_("proxy") {}
+
+void RoutingEngine::init(std::shared_ptr<GeoIP> geoip) {
+    geoip_ = geoip;
+}
+
+void RoutingEngine::setBypassCountries(const std::vector<std::string>& countries) {
+    bypass_countries_ = countries;
+}
+
+void RoutingEngine::setProxyCountries(const std::vector<std::string>& countries) {
+    proxy_countries_ = countries;
+}
+
+void RoutingEngine::setBypassLan(bool enable) {
+    bypass_lan_ = enable;
+}
+
+bool RoutingEngine::isPrivateIP(uint32_t ip) {
+    if ((ip & 0xFF000000) == 0x0A000000) return true;
+    if ((ip & 0xFFF00000) == 0xAC100000) return true;
+    if ((ip & 0xFFFF0000) == 0xC0A80000) return true;
+    if ((ip & 0xFF000000) == 0x7F000000) return true;
+    return false;
+}
+
+std::string RoutingEngine::getRoute(const std::string& dest_ip) {
+    if (shouldBypass(dest_ip)) return "DIRECT";
+    if (shouldProxy(dest_ip)) return "PROXY";
+    return default_action_;
+}
+
+bool RoutingEngine::shouldBypass(const std::string& dest_ip) {
+    uint32_t ip = geoip_ ? geoip_->ipToUint(dest_ip) : 0;
+    if (ip == 0) return false;
+    if (bypass_lan_ && isPrivateIP(ip)) return true;
+    if (geoip_ && geoip_->isLoaded()) {
+        std::string country = geoip_->lookupCountry(ip);
+        for (const auto& c : bypass_countries_) {
+            if (country == c) return true;
+        }
+    }
+    return false;
+}
+
+bool RoutingEngine::shouldProxy(const std::string& dest_ip) {
+    uint32_t ip = geoip_ ? geoip_->ipToUint(dest_ip) : 0;
+    if (ip == 0) return false;
+    if (geoip_ && geoip_->isLoaded()) {
+        std::string country = geoip_->lookupCountry(ip);
+        for (const auto& c : proxy_countries_) {
+            if (country == c) return true;
+        }
+    }
+    return false;
+}
+
+// ============== GlobVPNClient ==============
 GlobVPNClient::GlobVPNClient() 
-    : auto_reconnect_(true), reconnect_delay_(5), timeout_(10), log_level_(LogLevel::INFO) {}
+    : auto_reconnect_(true), reconnect_delay_(5), timeout_(10), log_level_(LogLevel::INFO) {
+    geoip_ = std::make_shared<GeoIP>();
+    routing_ = std::make_unique<RoutingEngine>();
+}
 
 GlobVPNClient::~GlobVPNClient() {
     disconnect();
 }
 
-bool GlobVPNClient::loadConfig(const std::string& config_file) {
-    std::string json_content = readFile(config_file);
-    if (json_content.empty()) {
-        log(LogLevel::ERROR, "Не удалось загрузить config.json");
-        return false;
+void GlobVPNClient::log(LogLevel level, const std::string& message) {
+    if (level < log_level_) return;
+    const char* level_str[] = {"DEBUG", "INFO", "WARNING", "ERROR"};
+    auto now = std::time(nullptr);
+    char time_str[64];
+    std::strftime(time_str, sizeof(time_str), "%H:%M:%S", std::localtime(&now));
+    std::cout << "[" << time_str << "] [" << level_str[static_cast<int>(level)] << "] " << message << std::endl;
+}
+
+std::string GlobVPNClient::readFile(const std::string& filename) {
+    std::ifstream file(filename);
+    if (!file.is_open()) return "";
+    std::stringstream buffer;
+    buffer << file.rdbuf();
+    return buffer.str();
+}
+
+std::string GlobVPNClient::parseJSON(const std::string& json, const std::string& key) {
+    std::string search_key = "\"" + key + "\"";
+    size_t pos = json.find(search_key);
+    if (pos == std::string::npos) return "";
+    pos = json.find(":", pos);
+    if (pos == std::string::npos) return "";
+    pos++;
+    while (pos < json.length() && (json[pos] == ' ' || json[pos] == '\t' || json[pos] == '\n')) pos++;
+    if (json[pos] == '"') {
+        pos++;
+        size_t end = json.find("\"", pos);
+        if (end != std::string::npos) return json.substr(pos, end - pos);
+    } else {
+        size_t end = json.find_first_of(",}\n", pos);
+        if (end != std::string::npos) return json.substr(pos, end - pos);
     }
+    return "";
+}
+
+bool GlobVPNClient::parseConfig(const std::string& config_file) {
+    std::string json = readFile(config_file);
+    if (json.empty()) return false;
     
-    // Парсинг серверов (упрощённый, для реального использования нужна JSON библиотека)
-    vless_config_.uuid = parseJSON(json_content, "uuid");
-    if (vless_config_.uuid.empty()) {
-        vless_config_.uuid = "123e4567-e89b-12d3-a456-426614174000";
-    }
-    
-    vless_config_.flow = parseJSON(json_content, "flow");
-    vless_config_.encryption = parseJSON(json_content, "encryption");
-    
-    std::string level_str = parseJSON(json_content, "level");
-    if (!level_str.empty()) {
-        vless_config_.level = std::stoi(level_str);
-    }
-    
-    reality_config_.fingerprint = parseJSON(json_content, "fingerprint");
-    reality_config_.server_name = parseJSON(json_content, "server_name");
-    
-    std::string reconnect_str = parseJSON(json_content, "auto_reconnect");
+    vless_config_.uuid = parseJSON(json, "uuid");
+    if (vless_config_.uuid.empty()) vless_config_.uuid = "123e4567-e89b-12d3-a456-426614174000";
+    vless_config_.flow = parseJSON(json, "flow");
+    vless_config_.encryption = parseJSON(json, "encryption");
+    std::string level_str = parseJSON(json, "level");
+    if (!level_str.empty()) vless_config_.level = std::stoi(level_str);
+    reality_config_.fingerprint = parseJSON(json, "fingerprint");
+    reality_config_.server_name = parseJSON(json, "server_name");
+    std::string reconnect_str = parseJSON(json, "auto_reconnect");
     auto_reconnect_ = (reconnect_str == "true");
+    std::string delay_str = parseJSON(json, "reconnect_delay_sec");
+    if (!delay_str.empty()) reconnect_delay_ = std::stoi(delay_str);
+    std::string timeout_str = parseJSON(json, "timeout_sec");
+    if (!timeout_str.empty()) timeout_ = std::stoi(timeout_str);
     
-    std::string delay_str = parseJSON(json_content, "reconnect_delay_sec");
-    if (!delay_str.empty()) {
-        reconnect_delay_ = std::stoi(delay_str);
-    }
-    
-    std::string timeout_str = parseJSON(json_content, "timeout_sec");
-    if (!timeout_str.empty()) {
-        timeout_ = std::stoi(timeout_str);
-    }
-    
-    // Ручное добавление серверов из конфига (в реальности нужен полноценный JSON парсер)
     servers_.clear();
     servers_.push_back({"ams-01.globvpn.nl", 443, "nl_reality_pub_1a2b3c4d5e6f7g8h9i0j", "deadbeef", "Amsterdam", 35});
     servers_.push_back({"ams-02.globvpn.nl", 8443, "nl_reality_pub_9z8y7x6w5v4u3t2s1r0q", "cafebabe", "Amsterdam", 62});
     servers_.push_back({"rtm-01.globvpn.nl", 443, "nl_reality_pub_0a1b2c3d4e5f6g7h8i9j", "feedface", "Rotterdam", 18});
     
-    log(LogLevel::INFO, "Конфигурация загружена: " + vless_config_.uuid);
     return true;
 }
 
-void GlobVPNClient::configure(const std::string& uuid, 
-                               const std::string& public_key, 
-                               const std::string& short_id) {
+bool GlobVPNClient::loadConfig(const std::string& config_file) {
+    if (!parseConfig(config_file)) {
+        log(LogLevel::ERROR, "Не удалось загрузить config.json");
+        return false;
+    }
+    log(LogLevel::INFO, "Конфигурация загружена");
+    return true;
+}
+
+bool GlobVPNClient::initGeoIP(const std::string& geoip_path) {
+    if (geoip_->init(geoip_path)) {
+        log(LogLevel::INFO, "GeoIP загружен: " + std::to_string(geoip_->getRecordCount()) + " записей");
+        routing_->init(geoip_);
+        routing_->setBypassCountries({"RU", "CN", "BY", "KZ", "UA"});
+        routing_->setProxyCountries({"NL", "US", "DE", "GB"});
+        routing_->setBypassLan(true);
+        return true;
+    }
+    log(LogLevel::WARNING, "GeoIP не загружен, работаем без него");
+    return false;
+}
+
+void GlobVPNClient::configure(const std::string& uuid, const std::string& public_key, const std::string& short_id) {
     vless_config_.uuid = uuid;
     reality_config_.public_key = public_key;
     reality_config_.short_id = short_id;
@@ -427,10 +484,7 @@ bool GlobVPNClient::connect(const std::string& server, int port) {
         reality_config_.short_id = servers_[0].short_id;
     }
     
-    if (on_connecting_) {
-        on_connecting_(target_server, target_port);
-    }
-    
+    if (on_connecting_) on_connecting_(target_server, target_port);
     log(LogLevel::INFO, "Подключение к " + target_server + ":" + std::to_string(target_port));
     
     if (vless_config_.uuid.empty() || reality_config_.public_key.empty()) {
@@ -446,31 +500,22 @@ bool GlobVPNClient::connect(const std::string& server, int port) {
     if (success) {
         connected_server_ = target_server + ":" + std::to_string(target_port);
         log(LogLevel::INFO, "Подключено успешно");
-        if (on_connected_) {
-            on_connected_(connected_server_, "VLESS+Reality");
-        }
+        if (on_connected_) on_connected_(connected_server_, "VLESS+Reality");
     } else {
         std::string err = "Ошибка handshake Reality";
         log(LogLevel::ERROR, err);
         if (on_error_) on_error_(err);
         tunnel_.reset();
     }
-    
     return success;
 }
 
 bool GlobVPNClient::connectToBestServer() {
     if (servers_.empty()) return false;
-    
-    // Выбор сервера с наименьшей нагрузкой
     auto best = std::min_element(servers_.begin(), servers_.end(),
         [](const ServerInfo& a, const ServerInfo& b) { return a.load < b.load; });
-    
     reality_config_.public_key = best->public_key;
     reality_config_.short_id = best->short_id;
-    
-    log(LogLevel::INFO, "Выбран лучший сервер: " + best->name + " (нагрузка: " + std::to_string(best->load) + "%)");
-    
     return connect(best->name, best->port);
 }
 
@@ -486,18 +531,9 @@ void GlobVPNClient::disconnect() {
 
 void GlobVPNClient::reconnect() {
     if (!auto_reconnect_) return;
-    
     log(LogLevel::INFO, "Переподключение через " + std::to_string(reconnect_delay_) + " секунд...");
     std::this_thread::sleep_for(std::chrono::seconds(reconnect_delay_));
-    
-    if (connected_server_.empty()) {
-        connectToBestServer();
-    } else {
-        size_t colon = connected_server_.find(':');
-        std::string server = connected_server_.substr(0, colon);
-        int port = std::stoi(connected_server_.substr(colon + 1));
-        connect(server, port);
-    }
+    connectToBestServer();
 }
 
 bool GlobVPNClient::isConnected() const {
@@ -508,46 +544,33 @@ std::string GlobVPNClient::getStatus() const {
     if (!tunnel_ || !tunnel_->isConnected()) {
         return "{\"connected\":false,\"country\":\"Netherlands\",\"company\":\"GlobVPN\"}";
     }
-    
     auto stats = tunnel_->getStats();
     auto now = std::chrono::steady_clock::now();
-    auto connected_sec = std::chrono::duration_cast<std::chrono::seconds>(now - stats.connected_since).count();
+    auto uptime = std::chrono::duration_cast<std::chrono::seconds>(now - stats.connected_since).count();
     
     std::ostringstream oss;
-    oss << "{"
-        << "\"connected\":true,"
-        << "\"server\":\"" << connected_server_ << "\","
-        << "\"protocol\":\"VLESS+Reality\","
-        << "\"country\":\"Netherlands\","
-        << "\"company\":\"GlobVPN\","
-        << "\"uptime_sec\":" << connected_sec << ","
-        << "\"stats\":{"
-        << "\"tx_bytes\":" << stats.tx_bytes << ","
-        << "\"rx_bytes\":" << stats.rx_bytes << ","
-        << "\"latency_ms\":" << stats.latency_ms
-        << "}}";
+    oss << "{\"connected\":true,\"server\":\"" << connected_server_ 
+        << "\",\"protocol\":\"VLESS+Reality\",\"country\":\"Netherlands\","
+        << "\"company\":\"GlobVPN\",\"uptime_sec\":" << uptime << ","
+        << "\"stats\":{\"tx_bytes\":" << stats.tx_bytes 
+        << ",\"rx_bytes\":" << stats.rx_bytes 
+        << ",\"latency_ms\":" << stats.latency_ms << "}}";
     return oss.str();
 }
 
 ConnectionStats GlobVPNClient::getStats() const {
-    if (tunnel_) {
-        return tunnel_->getStats();
-    }
-    return ConnectionStats{};
+    return tunnel_ ? tunnel_->getStats() : ConnectionStats{};
 }
 
 ssize_t GlobVPNClient::sendData(const std::vector<uint8_t>& data) {
     if (!tunnel_) return -1;
     ssize_t sent = tunnel_->send(data);
-    if (sent > 0 && on_stats_) {
-        on_stats_(tunnel_->getStats());
-    }
+    if (sent > 0 && on_stats_) on_stats_(tunnel_->getStats());
     return sent;
 }
 
 std::vector<uint8_t> GlobVPNClient::receiveData(size_t size) {
-    if (!tunnel_) return {};
-    return tunnel_->recv(size);
+    return tunnel_ ? tunnel_->recv(size) : std::vector<uint8_t>();
 }
 
 void GlobVPNClient::onConnecting(std::function<void(const std::string&, int)> callback) {
@@ -594,257 +617,15 @@ std::string generateUUID() {
     std::random_device rd;
     std::mt19937 gen(rd());
     std::uniform_int_distribution<> dis(0, 15);
-    
     std::stringstream ss;
     ss << std::hex;
-    
     for (int i = 0; i < 36; i++) {
-        if (i == 8 || i == 13 || i == 18 || i == 23) {
-            ss << '-';
-        } else if (i == 14) {
-            ss << '4';
-        } else if (i == 19) {
-            ss << dis(gen) % 4 + 8;
-        } else {
-            ss << dis(gen);
-        }
+        if (i == 8 || i == 13 || i == 18 || i == 23) ss << '-';
+        else if (i == 14) ss << '4';
+        else if (i == 19) ss << (dis(gen) % 4 + 8);
+        else ss << dis(gen);
     }
-    
     return ss.str();
 }
 
 } // namespace GlobVPN
-
-
-// ============== GeoIP реализация ==============
-
-GeoIP::GeoIP() {}
-
-GeoIP::~GeoIP() {}
-
-uint32_t GeoIP::ipToUint(const std::string& ip) {
-    struct in_addr addr;
-    if (inet_pton(AF_INET, ip.c_str(), &addr) == 1) {
-        return ntohl(addr.s_addr);
-    }
-    return 0;
-}
-
-std::string GeoIP::uintToIp(uint32_t ip) {
-    struct in_addr addr;
-    addr.s_addr = htonl(ip);
-    return std::string(inet_ntoa(addr));
-}
-
-bool GeoIP::init(const std::string& db_path) {
-    db_path_ = db_path;
-    
-    // Пытаемся загрузить существующую базу
-    if (loadFromBinaryFile(db_path)) {
-        return true;
-    }
-    
-    // Если нет, скачиваем
-    std::cout << "[GeoIP] База не найдена, скачиваю..." << std::endl;
-    if (update()) {
-        return loadFromBinaryFile(db_path);
-    }
-    
-    return false;
-}
-
-bool GeoIP::update() {
-    std::string url = "https://github.com/Loyalsoldier/geoip/releases/latest/download/geoip.dat";
-    return downloadDatabase(url);
-}
-
-bool GeoIP::downloadDatabase(const std::string& url) {
-#ifdef _WIN32
-    HINTERNET hInternet = InternetOpen(L"GlobVPN/2.0", INTERNET_OPEN_TYPE_DIRECT, NULL, NULL, 0);
-    if (!hInternet) return false;
-    
-    HINTERNET hUrl = InternetOpenUrlA(hInternet, url.c_str(), NULL, 0, INTERNET_FLAG_RELOAD, 0);
-    if (!hUrl) {
-        InternetCloseHandle(hInternet);
-        return false;
-    }
-    
-    std::ofstream file(db_path_, std::ios::binary);
-    char buffer[4096];
-    DWORD bytesRead;
-    
-    while (InternetReadFile(hUrl, buffer, sizeof(buffer), &bytesRead) && bytesRead > 0) {
-        file.write(buffer, bytesRead);
-    }
-    
-    file.close();
-    InternetCloseHandle(hUrl);
-    InternetCloseHandle(hInternet);
-    
-    return true;
-#else
-    CURL* curl = curl_easy_init();
-    if (!curl) return false;
-    
-    FILE* fp = fopen(db_path_.c_str(), "wb");
-    if (!fp) {
-        curl_easy_cleanup(curl);
-        return false;
-    }
-    
-    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, fp);
-    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
-    
-    CURLcode res = curl_easy_perform(curl);
-    
-    fclose(fp);
-    curl_easy_cleanup(curl);
-    
-    return res == CURLE_OK;
-#endif
-}
-
-bool GeoIP::loadFromBinaryFile(const std::string& path) {
-    std::ifstream file(path, std::ios::binary);
-    if (!file.is_open()) return false;
-    
-    db_.records.clear();
-    
-    // V2Ray geoip.dat формат:
-    // [4 байта] количество записей
-    // для каждой записи: [4 байта] from_ip, [4 байта] to_ip, [2 байта] country_code
-    uint32_t count;
-    file.read(reinterpret_cast<char*>(&count), sizeof(count));
-    count = ntohl(count);
-    
-    if (count == 0 || count > 500000) { // Защита от мусора
-        file.close();
-        return false;
-    }
-    
-    db_.records.resize(count);
-    
-    for (uint32_t i = 0; i < count; i++) {
-        file.read(reinterpret_cast<char*>(&db_.records[i].from_ip), 4);
-        file.read(reinterpret_cast<char*>(&db_.records[i].to_ip), 4);
-        file.read(db_.records[i].country_code, 2);
-        
-        db_.records[i].from_ip = ntohl(db_.records[i].from_ip);
-        db_.records[i].to_ip = ntohl(db_.records[i].to_ip);
-    }
-    
-    file.close();
-    
-    if (db_.records.empty()) return false;
-    
-    db_.is_loaded = true;
-    return true;
-}
-
-std::string GeoIP::lookupCountry(const std::string& ip) {
-    uint32_t ip_num = ipToUint(ip);
-    return lookupCountry(ip_num);
-}
-
-std::string GeoIP::lookupCountry(uint32_t ip_addr) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    
-    if (!db_.is_loaded) return "UNKNOWN";
-    
-    // Бинарный поиск по диапазонам
-    auto it = std::upper_bound(db_.records.begin(), db_.records.end(), ip_addr,
-        [](uint32_t ip, const GeoIPRecordV4& record) {
-            return ip < record.from_ip;
-        });
-    
-    if (it != db_.records.begin()) {
-        --it;
-        if (ip_addr >= it->from_ip && ip_addr <= it->to_ip) {
-            return std::string(it->country_code, 2);
-        }
-    }
-    
-    return "UNKNOWN";
-}
-
-// ============== RoutingEngine реализация ==============
-
-RoutingEngine::RoutingEngine() : bypass_lan_(true), default_action_("proxy") {}
-
-RoutingEngine::~RoutingEngine() {}
-
-bool RoutingEngine::init(std::shared_ptr<GeoIP> geoip, const std::string& config_path) {
-    geoip_ = geoip;
-    
-    // Парсим конфиг (упрощённо, лучше использовать JSON библиотеку)
-    std::string json = readFile(config_path);
-    
-    std::string bypass = parseJSON(json, "bypass_countries");
-    std::string proxy = parseJSON(json, "proxy_countries");
-    std::string def_action = parseJSON(json, "default_action");
-    
-    if (!def_action.empty()) default_action_ = def_action;
-    
-    return true;
-}
-
-bool RoutingEngine::isPrivateIP(uint32_t ip) {
-    // 10.0.0.0/8
-    if ((ip & 0xFF000000) == 0x0A000000) return true;
-    // 172.16.0.0/12
-    if ((ip & 0xFFF00000) == 0xAC100000) return true;
-    // 192.168.0.0/16
-    if ((ip & 0xFFFF0000) == 0xC0A80000) return true;
-    // 127.0.0.0/8
-    if ((ip & 0xFF000000) == 0x7F000000) return true;
-    
-    return false;
-}
-
-std::string RoutingEngine::getRoute(const std::string& dest_ip) {
-    if (shouldBypass(dest_ip)) {
-        return "DIRECT";
-    }
-    if (shouldProxy(dest_ip)) {
-        return "PROXY";
-    }
-    return default_action_;
-}
-
-bool RoutingEngine::shouldBypass(const std::string& dest_ip) {
-    uint32_t ip = geoip_->ipToUint(dest_ip);
-    
-    if (ip == 0) return false;
-    
-    // LAN IP
-    if (bypass_lan_ && isPrivateIP(ip)) {
-        return true;
-    }
-    
-    // По GeoIP
-    if (geoip_ && geoip_->isLoaded()) {
-        std::string country = geoip_->lookupCountry(dest_ip);
-        // bypass_countries_ содержит RU, CN и т.д.
-        if (country == "RU" || country == "CN") {
-            return true;
-        }
-    }
-    
-    return false;
-}
-
-bool RoutingEngine::shouldProxy(const std::string& dest_ip) {
-    uint32_t ip = geoip_->ipToUint(dest_ip);
-    if (ip == 0) return false;
-    
-    if (geoip_ && geoip_->isLoaded()) {
-        std::string country = geoip_->lookupCountry(dest_ip);
-        if (country == "NL") {
-            return true;
-        }
-    }
-    
-    return false;
-}
