@@ -8,6 +8,7 @@
 #include <fstream>
 #include <algorithm>
 #include <ctime>
+#include <arpa/inet.h>
 
 #ifdef _WIN32
     #include <windows.h>
@@ -613,3 +614,237 @@ std::string generateUUID() {
 }
 
 } // namespace GlobVPN
+
+
+// ============== GeoIP реализация ==============
+
+GeoIP::GeoIP() {}
+
+GeoIP::~GeoIP() {}
+
+uint32_t GeoIP::ipToUint(const std::string& ip) {
+    struct in_addr addr;
+    if (inet_pton(AF_INET, ip.c_str(), &addr) == 1) {
+        return ntohl(addr.s_addr);
+    }
+    return 0;
+}
+
+std::string GeoIP::uintToIp(uint32_t ip) {
+    struct in_addr addr;
+    addr.s_addr = htonl(ip);
+    return std::string(inet_ntoa(addr));
+}
+
+bool GeoIP::init(const std::string& db_path) {
+    db_path_ = db_path;
+    
+    // Пытаемся загрузить существующую базу
+    if (loadFromBinaryFile(db_path)) {
+        return true;
+    }
+    
+    // Если нет, скачиваем
+    std::cout << "[GeoIP] База не найдена, скачиваю..." << std::endl;
+    if (update()) {
+        return loadFromBinaryFile(db_path);
+    }
+    
+    return false;
+}
+
+bool GeoIP::update() {
+    std::string url = "https://github.com/Loyalsoldier/geoip/releases/latest/download/geoip.dat";
+    return downloadDatabase(url);
+}
+
+bool GeoIP::downloadDatabase(const std::string& url) {
+#ifdef _WIN32
+    HINTERNET hInternet = InternetOpen(L"GlobVPN/2.0", INTERNET_OPEN_TYPE_DIRECT, NULL, NULL, 0);
+    if (!hInternet) return false;
+    
+    HINTERNET hUrl = InternetOpenUrlA(hInternet, url.c_str(), NULL, 0, INTERNET_FLAG_RELOAD, 0);
+    if (!hUrl) {
+        InternetCloseHandle(hInternet);
+        return false;
+    }
+    
+    std::ofstream file(db_path_, std::ios::binary);
+    char buffer[4096];
+    DWORD bytesRead;
+    
+    while (InternetReadFile(hUrl, buffer, sizeof(buffer), &bytesRead) && bytesRead > 0) {
+        file.write(buffer, bytesRead);
+    }
+    
+    file.close();
+    InternetCloseHandle(hUrl);
+    InternetCloseHandle(hInternet);
+    
+    return true;
+#else
+    CURL* curl = curl_easy_init();
+    if (!curl) return false;
+    
+    FILE* fp = fopen(db_path_.c_str(), "wb");
+    if (!fp) {
+        curl_easy_cleanup(curl);
+        return false;
+    }
+    
+    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, fp);
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
+    
+    CURLcode res = curl_easy_perform(curl);
+    
+    fclose(fp);
+    curl_easy_cleanup(curl);
+    
+    return res == CURLE_OK;
+#endif
+}
+
+bool GeoIP::loadFromBinaryFile(const std::string& path) {
+    std::ifstream file(path, std::ios::binary);
+    if (!file.is_open()) return false;
+    
+    db_.records.clear();
+    
+    // V2Ray geoip.dat формат:
+    // [4 байта] количество записей
+    // для каждой записи: [4 байта] from_ip, [4 байта] to_ip, [2 байта] country_code
+    uint32_t count;
+    file.read(reinterpret_cast<char*>(&count), sizeof(count));
+    count = ntohl(count);
+    
+    if (count == 0 || count > 500000) { // Защита от мусора
+        file.close();
+        return false;
+    }
+    
+    db_.records.resize(count);
+    
+    for (uint32_t i = 0; i < count; i++) {
+        file.read(reinterpret_cast<char*>(&db_.records[i].from_ip), 4);
+        file.read(reinterpret_cast<char*>(&db_.records[i].to_ip), 4);
+        file.read(db_.records[i].country_code, 2);
+        
+        db_.records[i].from_ip = ntohl(db_.records[i].from_ip);
+        db_.records[i].to_ip = ntohl(db_.records[i].to_ip);
+    }
+    
+    file.close();
+    
+    if (db_.records.empty()) return false;
+    
+    db_.is_loaded = true;
+    return true;
+}
+
+std::string GeoIP::lookupCountry(const std::string& ip) {
+    uint32_t ip_num = ipToUint(ip);
+    return lookupCountry(ip_num);
+}
+
+std::string GeoIP::lookupCountry(uint32_t ip_addr) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    
+    if (!db_.is_loaded) return "UNKNOWN";
+    
+    // Бинарный поиск по диапазонам
+    auto it = std::upper_bound(db_.records.begin(), db_.records.end(), ip_addr,
+        [](uint32_t ip, const GeoIPRecordV4& record) {
+            return ip < record.from_ip;
+        });
+    
+    if (it != db_.records.begin()) {
+        --it;
+        if (ip_addr >= it->from_ip && ip_addr <= it->to_ip) {
+            return std::string(it->country_code, 2);
+        }
+    }
+    
+    return "UNKNOWN";
+}
+
+// ============== RoutingEngine реализация ==============
+
+RoutingEngine::RoutingEngine() : bypass_lan_(true), default_action_("proxy") {}
+
+RoutingEngine::~RoutingEngine() {}
+
+bool RoutingEngine::init(std::shared_ptr<GeoIP> geoip, const std::string& config_path) {
+    geoip_ = geoip;
+    
+    // Парсим конфиг (упрощённо, лучше использовать JSON библиотеку)
+    std::string json = readFile(config_path);
+    
+    std::string bypass = parseJSON(json, "bypass_countries");
+    std::string proxy = parseJSON(json, "proxy_countries");
+    std::string def_action = parseJSON(json, "default_action");
+    
+    if (!def_action.empty()) default_action_ = def_action;
+    
+    return true;
+}
+
+bool RoutingEngine::isPrivateIP(uint32_t ip) {
+    // 10.0.0.0/8
+    if ((ip & 0xFF000000) == 0x0A000000) return true;
+    // 172.16.0.0/12
+    if ((ip & 0xFFF00000) == 0xAC100000) return true;
+    // 192.168.0.0/16
+    if ((ip & 0xFFFF0000) == 0xC0A80000) return true;
+    // 127.0.0.0/8
+    if ((ip & 0xFF000000) == 0x7F000000) return true;
+    
+    return false;
+}
+
+std::string RoutingEngine::getRoute(const std::string& dest_ip) {
+    if (shouldBypass(dest_ip)) {
+        return "DIRECT";
+    }
+    if (shouldProxy(dest_ip)) {
+        return "PROXY";
+    }
+    return default_action_;
+}
+
+bool RoutingEngine::shouldBypass(const std::string& dest_ip) {
+    uint32_t ip = geoip_->ipToUint(dest_ip);
+    
+    if (ip == 0) return false;
+    
+    // LAN IP
+    if (bypass_lan_ && isPrivateIP(ip)) {
+        return true;
+    }
+    
+    // По GeoIP
+    if (geoip_ && geoip_->isLoaded()) {
+        std::string country = geoip_->lookupCountry(dest_ip);
+        // bypass_countries_ содержит RU, CN и т.д.
+        if (country == "RU" || country == "CN") {
+            return true;
+        }
+    }
+    
+    return false;
+}
+
+bool RoutingEngine::shouldProxy(const std::string& dest_ip) {
+    uint32_t ip = geoip_->ipToUint(dest_ip);
+    if (ip == 0) return false;
+    
+    if (geoip_ && geoip_->isLoaded()) {
+        std::string country = geoip_->lookupCountry(dest_ip);
+        if (country == "NL") {
+            return true;
+        }
+    }
+    
+    return false;
+}
