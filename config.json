@@ -6,7 +6,7 @@
   "geoip": {
     "enabled": true,
     "database_path": "geoip.dat",
-    "auto_update": true,
+    "auto_update": false,
     "update_url": "https://github.com/Loyalsoldier/geoip/releases/latest/download/geoip.dat"
   },
   "servers": [
@@ -40,8 +40,8 @@
   ],
   "routing": {
     "bypass_lan": true,
-    "bypass_countries": ["RU", "CN"],
-    "proxy_countries": ["NL"],
+    "bypass_countries": ["RU", "CN", "BY", "KZ", "UA"],
+    "proxy_countries": ["NL", "US", "DE", "GB"],
     "default_action": "proxy"
   },
   "client": {
